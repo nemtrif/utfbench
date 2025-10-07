@@ -1,23 +1,21 @@
 #include <string_view>
 #include <vector>
 #include <bit>
-#include <algorithm>
 #include <iostream>
 #include <iomanip>
 #include <chrono>
-#include <functional>
+#include <tuple>
 #include <string>
-#include <cstdint>
 
 using namespace std;
 
 constexpr string_view ascii_text = "The quick brown fox jumps over the lazy dog";
 
 void generate_test_data(vector<unsigned char>& data) {
-    constexpr int data_multiplier = 50'000'000;
+    constexpr int data_multiplier = 1'000'000;
     data.resize(ascii_text.size() * data_multiplier);
     for (int i = 0; i < data_multiplier; ++i) {
-        copy(ascii_text.begin(), ascii_text.end(), data.begin() + i * ascii_text.size());
+        data.insert(data.end(), ascii_text.begin(), ascii_text.end());
     }
 }
 
@@ -47,7 +45,6 @@ int countlz_utf8_sequence_length(unsigned char lead_byte) {
 }
 
 int lookuputf8_sequence_length(unsigned char lead_byte) {
-    // Hard-coded lookup table for UTF-8 lead byte lengths
 static const unsigned char lookup[256] = {
         // 0x00–0x7F: 1
         1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
@@ -68,33 +65,71 @@ static const unsigned char lookup[256] = {
         // 0xF5–0xFF: 0
         0,0,0,0,0,0,0,0,0,0,0
     };
-
-    // Access the hard-coded table to determine the sequence length
     return lookup[lead_byte];
 }
 
+// Enum identifying each sequence-length implementation
+enum class SeqlenMethod { Bitmask = 0, Countlz = 1, Lookup = 2 };
+
+// Each run_* function performs the timed inner loop for its method and
+// returns tuple<ms, items_processed>.
+static tuple<long long, size_t> run_bitmask(const vector<unsigned char>& data) {
+    size_t count = 0;
+    auto start = chrono::steady_clock::now();
+    for (size_t i = 0; i < data.size(); ++i) {
+        i += bitmask_utf8_sequence_length(data[i]);
+        ++count;
+    }
+    auto end = chrono::steady_clock::now();
+    auto ms = chrono::duration_cast<chrono::milliseconds>(end - start).count();
+    return make_tuple(ms, count);
+}
+
+static tuple<long long, size_t> run_countlz(const vector<unsigned char>& data) {
+    size_t count = 0;
+    auto start = chrono::steady_clock::now();
+    for (size_t i = 0; i < data.size(); ++i) {
+        i += countlz_utf8_sequence_length(data[i]);
+        ++count;
+    }
+    auto end = chrono::steady_clock::now();
+    auto ms = chrono::duration_cast<chrono::milliseconds>(end - start).count();
+    return make_tuple(ms, count);
+}
+
+static tuple<long long, size_t> run_lookup(const vector<unsigned char>& data) {
+    size_t count = 0;
+    auto start = chrono::steady_clock::now();
+    for (size_t i = 0; i < data.size(); ++i) {
+        i += lookuputf8_sequence_length(data[i]);
+        ++count;
+    }
+    auto end = chrono::steady_clock::now();
+    auto ms = chrono::duration_cast<chrono::milliseconds>(end - start).count();
+    return make_tuple(ms, count);
+}
 
 
 int main(int argc, char* argv[]) {
-    // registry of available functions
-    const vector<pair<string, function<int(unsigned char)>>> registry{
-        {"bitmask", bitmask_utf8_sequence_length},
-        {"countlz", countlz_utf8_sequence_length},
-        {"lookup", lookuputf8_sequence_length}
+    // registry name -> enum id
+    const vector<pair<string, SeqlenMethod>> registry = {
+        {"bitmask", SeqlenMethod::Bitmask},
+        {"countlz", SeqlenMethod::Countlz},
+        {"lookup", SeqlenMethod::Lookup}
     };
 
     const vector<string> args(argv + 1, argv + argc);
-    vector<string> selected_names;
+    vector<SeqlenMethod> selected;
 
     for (const auto &a : args) {
         if (a == "--all") {
-            for (auto &p : registry) selected_names.push_back(p.first);
+            for (auto &p : registry) selected.push_back(p.second);
         } else if (a == "--bitmask" || a == "bitmask") {
-            selected_names.push_back("bitmask");
+            selected.push_back(SeqlenMethod::Bitmask);
         } else if (a == "--countlz" || a == "countlz") {
-            selected_names.push_back("countlz");
+            selected.push_back(SeqlenMethod::Countlz);
         } else if (a == "--lookup" || a == "lookup") {
-            selected_names.push_back("lookup");
+            selected.push_back(SeqlenMethod::Lookup);
         } else if (a == "-h" || a == "--help") {
             cout << "Usage: " << argv[0] << " [--all|--bitmask|--countlz|--lookup]" << '\n';
             cout << "Prints CSV to stdout: function,time_ms,items,checksum" << '\n';
@@ -106,49 +141,42 @@ int main(int argc, char* argv[]) {
     }
 
     // if nothing selected, show help
-    if (selected_names.empty()) {
+    if (selected.empty()) {
         cerr << "No functions selected. Use --all or one of --bitmask --countlz --lookup.\n";
         return 2;
     }
-
-    // remove duplicates while preserving order
-    vector<string> unique_selected;
-    for (auto &n : selected_names) {
-        if (find(unique_selected.begin(), unique_selected.end(), n) == unique_selected.end())
-            unique_selected.push_back(n);
-    }
-    selected_names.swap(unique_selected);
 
     // generate data
     vector<unsigned char> data;
     generate_test_data(data);
 
-    // print CSV header to stdout (no checksum column)
-        // print CSV header to stdout (add MB/s column)
-        cout << "function,time_ms,items,MB_per_s\n";
+    // CSV header
+    cout << "function,time_ms,items,MB_per_s\n";
 
     // run each selected function and print results
-    for (auto &name : selected_names) {
-        auto it = find_if(registry.begin(), registry.end(), [&](auto &p){ return p.first == name; });
-        if (it == registry.end()) {
-            cerr << "Unknown function: " << name << "\n";
-            continue;
+    for (auto &method : selected) {
+        long long ms = 0;
+        size_t count = 0;
+        switch (method) {
+            case SeqlenMethod::Bitmask:
+                std::tie(ms, count) = run_bitmask(data);
+            break;
+            case SeqlenMethod::Countlz:
+                std::tie(ms, count) = run_countlz(data);
+            break;
+            case SeqlenMethod::Lookup:
+                std::tie(ms, count) = run_lookup(data);
+            break;
         }
-        auto fn = it->second;
-
-        auto start = chrono::steady_clock::now();
-        for (size_t i = 0; i < data.size(); ++i) {
-            (void)fn(data[i]);
-        }
-        auto end = chrono::steady_clock::now();
-        auto ms = chrono::duration_cast<chrono::milliseconds>(end - start).count();
-        chrono::duration<double> dur = end - start;
+        chrono::duration<double> dur = chrono::milliseconds(ms);
         double secs = dur.count();
-        double mb = static_cast<double>(data.size()) / 1e6; // megabytes (10^6 bytes)
+        double mb = static_cast<double>(data.size()) / 1e6;
         double mbps = (secs > 0.0) ? (mb / secs) : 0.0;
 
-        // CSV to stdout; print throughput with 2 decimal places
-        cout << name << ',' << ms << ',' << data.size() << ',' << fixed << setprecision(2) << mbps << '\n' << defaultfloat;
+        // get name for printing
+        string name;
+        for (auto &p : registry) if (p.second == method) name = p.first;
+        cout << name << ',' << ms << ',' << count << ',' << fixed << setprecision(2) << mbps << '\n' << defaultfloat;
     }
 
     return 0;

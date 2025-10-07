@@ -2,7 +2,8 @@
 # It will build `xlbench` from `xlbench.cpp` if that file is added.
 
 CXX := clang++
-CXXFLAGS := -std=c++20 -O2 -fno-jump-tables -Wall -Wextra
+CXXFLAGS := -std=c++20 -O2 -Wall -Wextra
+#CXXFLAGS := -std=c++20 -O2 -fno-jump-tables -Wall -Wextra
 
 # discover sources and corresponding targets
 SRCS := slbench.cpp
